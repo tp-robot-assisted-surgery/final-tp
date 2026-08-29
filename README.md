@@ -176,8 +176,3 @@ numbers are not directly comparable. Best checkpoint per column in bold.
 Epoch 20 wins every column, which means the generator was still improving when training
 stopped — this sweep does not locate a maximum. Colour + depth beats colour alone under both
 averaging schemes at that checkpoint, matching the depth effect seen above.
-
-## Known gap
-
-`control-net-training/` imports an `exp_utils` module (run directories, logging, checkpoint
-pruning) that is not in this repository.
