@@ -100,13 +100,19 @@ python light_downstream/train_segformer_light_overlap_ignore_cli.py \
     --dataset-dir COMBINED/<name> --output-dir RUN
 
 python light_downstream/predict_segformer_overlap_ignore_cli.py \
-    --dataset-dir COMBINED/<name> --checkpoint RUN --output-root PREDS
+    --dataset-dir COMBINED/<name> --checkpoint RUN/final --output-root PREDS
 
 python light_downstream/compute_basic_seg_metrics_ignore255.py \
-    --gt-dir PREDS/test_gt --pred-dir PREDS/test_pred --output-dir METRICS \
+    --gt-dir PREDS/gt_masks --pred-dir PREDS/segformer_predictions \
+    --output-dir METRICS \
     --labels abdominal_wall:1 colon:2 liver:3 pancreas:4 \
              small_intestine:5 spleen:6 stomach:7
 ```
+
+`<name>` is one of the dataset names hardcoded in `TARGET_DATASETS` at the top of the first
+script. Step 2 saves the usable model to `RUN/final` — the bare `RUN` holds Trainer
+`checkpoint-N/` dirs without the image processor, so step 3 needs `RUN/final`. Step 3 writes
+predictions and ground truth to `PREDS/segformer_predictions/` and `PREDS/gt_masks/`.
 
 Any depth arm needs precomputed depth maps named `{idx:06d}.png`, keyed to the dataset row
 index, before it will run.
@@ -115,7 +121,7 @@ index, before it will run.
 
 | folder | contents |
 |---|---|
-| `control-net-training/` | Canny baseline, colour-map generator, colour + depth generator |
+| `control-net-training/` | minimal reference script, colour-map generator, colour + depth generator |
 | `self-flow-training/` | `train-cnet-selflfow/` (Approach A), `train-lora-selfflow/` (Approach B) |
 | `light_downstream/` | build combined datasets, fine-tune SegFormer-B3, predict, score |
 | `util-img/` | figures used below |
@@ -199,3 +205,4 @@ numbers are not directly comparable. Best checkpoint per column in bold.
 Epoch 20 wins every column, which means the generator was still improving when training
 stopped — this sweep does not locate a maximum. Colour + depth beats colour alone under both
 averaging schemes at that checkpoint, matching the depth effect seen above.
+
