@@ -1,14 +1,10 @@
 # Synthetic Surgical Images for Downstream Segmentation
 
 Generate laparoscopic images from organ masks with Stable Diffusion 1.5 + ControlNet on the
-DSAD dataset, then check whether adding them to the real training set actually improves a
-downstream SegFormer.
-
-DSAD gives us about 850 annotated frames, which is the whole problem. A mask-conditioned
-generator can turn one annotated frame into many, but only if it learns enough structure
-from that same small set. So the question here is whether a **Self-Flow** representation
-self-distillation loss, bolted onto the usual denoising objective, yields synthetic data
-that is more useful downstream than the identical model trained with a plain DDPM loss.
+DSAD dataset, then check whether adding them to the real training set improves a downstream
+SegFormer. The question: does a **Self-Flow** representation self-distillation loss produce
+synthetic data that is more useful downstream than the identical model trained with a plain
+DDPM loss?
 
 ## Pipeline
 
@@ -18,9 +14,9 @@ mask -> image                same generators            real + generated data
 generators                   + Self-Flow loss           -> SegFormer -> IoU / Dice
 ```
 
-The third stage is the one that decides anything. Images are sampled from each generator
-checkpoint, mixed into the real data, and a SegFormer is fine-tuned and scored on the real
-test split. A generator is only better if that final number moves.
+The third stage decides everything. Images are sampled from each generator checkpoint, mixed
+into the real data, and a SegFormer is fine-tuned and scored on the real test split. A
+generator is only better if that final number moves.
 
 ## The three arms
 
@@ -30,9 +26,8 @@ test split. A generator is only better if that final number moves.
 | Arm 2 | colour + **frozen** depth | `train_controlnet_depth.py` |
 | Arm 3 | colour + **trained** depth | `train_controlnet_depth.py --train_depth` |
 
-Depth starts frozen because monocular depth estimators are out of domain on surgical
-scenes. It is used as a fixed geometric prior at conditioning scale 0.5, and Arm 3 unfreezes
-it to see whether adapting it helps.
+Depth starts frozen — monocular depth is out of domain on surgical scenes — and is applied
+as a fixed prior at conditioning scale 0.5. Arm 3 unfreezes it.
 
 ## Self-Flow
 
@@ -41,12 +36,12 @@ L = L_gen + REP_GAMMA * L_rep
 ```
 
 `L_gen` is the standard single-timestep DDPM epsilon MSE, left untouched so a run never
-drifts away from the baseline it is being compared against. `L_rep` is the negative cosine
-similarity between mid-block features of a **student**, fed latents where a fraction
-`MASK_RATIO` of positions sits at a second independent timestep, and a stop-grad **EMA
-teacher**, fed the cleaner input at the smaller of the two timesteps. `REP_GAMMA = 0` turns
-Self-Flow off and gives the matched plain-DDPM baseline, with data, seed, LR, rank, epochs
-and augmentation all identical. That is what makes the comparison fair.
+drifts from the baseline it is compared against. `L_rep` is the negative cosine similarity
+between mid-block features of a **student**, fed latents where a fraction `MASK_RATIO` of
+positions sits at a second independent timestep, and a stop-grad **EMA teacher**, fed the
+cleaner input at the smaller of the two timesteps. `REP_GAMMA = 0` turns Self-Flow off and
+gives the matched plain-DDPM baseline, with data, seed, LR, rank, epochs and augmentation
+identical. That is what makes the comparison fair.
 
 The loss can be attached at two points, and both are implemented.
 
@@ -54,48 +49,76 @@ The loss can be attached at two points, and both are implemented.
 is an EMA deep copy of the ControlNet, and since the LoRA is frozen and shared, nothing gets
 swapped inside the loop.
 
-- `self-flow-training/train-cnet-selflfow/train_cnet_lorafreez_selfflow.py` — seg ControlNet
-- `self-flow-training/train-cnet-selflfow/train_mcnt_lorafreez_selfflow.py` — seg + depth
-
 **Approach B — on the UNet LoRA**, with the ControlNet trained plainly on top afterwards.
 Student and teacher are two PEFT adapters (`default` / `ema`) on the same UNet, picked with
 `set_adapter`, so there is no second copy of the model.
 
-- `self-flow-training/train-lora-selfflow/train_lora_selfflow.py` — LoRA, Self-Flow
-- `self-flow-training/train-lora-selfflow/train_cnet_seg_frozen_lora.py` — seg ControlNet
-- `self-flow-training/train-lora-selfflow/train_cnet_seg_depth_frozen_lora.py` — seg + depth
+## How to run
 
-These five are configured by editing the constants at the top of each file; there are no CLI
-flags. Set `WS`, then `DATA`, `OUT` and any warm-start paths. `MAX_TRAIN_SAMPLES = 2` is a
-smoke test. Each run writes `train.log` and per-epoch checkpoints under `OUT/checkpoints/`,
-with `final/` as the last. The EMA teacher and projection head are training-only and are not
-saved.
+The `self-flow-training/` scripts have no CLI flags — configure them by editing the constants
+at the top. Set `WS`, then `DATA`, `OUT` and any warm-start paths. `MAX_TRAIN_SAMPLES = 2`
+gives a smoke test. Every run writes `train.log` and per-epoch checkpoints under
+`OUT/checkpoints/`, with `final/` as the last one.
+
+**Baseline generators** — independent, CLI flags:
+
+```bash
+python control-net-training/train_controlnet_colormap.py                 # Arm 1
+python control-net-training/train_controlnet_depth.py                    # Arm 2
+python control-net-training/train_controlnet_depth.py --train_depth      # Arm 3
+```
+
+**Approach A** — each script is self-contained and can run on its own:
+
+```bash
+python self-flow-training/train-cnet-selflfow/train_cnet_lorafreez_selfflow.py   # seg
+python self-flow-training/train-cnet-selflfow/train_mcnt_lorafreez_selfflow.py   # seg + depth
+```
+
+**Approach B** — must run in order. `train_lora_selfflow.py` is the only script that trains
+and saves a LoRA; the other two load it and train a ControlNet on top, so they cannot run
+first:
+
+```bash
+# 1. Self-Flow on the LoRA -> writes OUT/checkpoints/final/
+python self-flow-training/train-lora-selfflow/train_lora_selfflow.py
+
+# 2. Point LORA_DIR at that final/, then run either or both
+python self-flow-training/train-lora-selfflow/train_cnet_seg_frozen_lora.py
+python self-flow-training/train-lora-selfflow/train_cnet_seg_depth_frozen_lora.py
+```
+
+**Downstream evaluation** — four steps, in order, after sampling images from a generator
+checkpoint:
+
+```bash
+python light_downstream/create_depthtrained_hf_datasets_real_plus_generated.py \
+    --real-dataset DSAD --epoch-sweep-root GENERATED \
+    --output-root COMBINED --work-dir SCRATCH
+
+python light_downstream/train_segformer_light_overlap_ignore_cli.py \
+    --dataset-dir COMBINED/<name> --output-dir RUN
+
+python light_downstream/predict_segformer_overlap_ignore_cli.py \
+    --dataset-dir COMBINED/<name> --checkpoint RUN --output-root PREDS
+
+python light_downstream/compute_basic_seg_metrics_ignore255.py \
+    --gt-dir PREDS/test_gt --pred-dir PREDS/test_pred --output-dir METRICS \
+    --labels abdominal_wall:1 colon:2 liver:3 pancreas:4 \
+             small_intestine:5 spleen:6 stomach:7
+```
+
+Any depth arm needs precomputed depth maps named `{idx:06d}.png`, keyed to the dataset row
+index, before it will run.
 
 ## Layout
 
 | folder | contents |
 |---|---|
-| `control-net-training/` | Canny baseline, colour-map generator, colour + depth generator (CLI flags) |
-| `self-flow-training/` | the two Self-Flow approaches, five scripts |
-| `light_downstream/` | build combined datasets, fine-tune SegFormer-B3, predict, score (CLI flags) |
+| `control-net-training/` | Canny baseline, colour-map generator, colour + depth generator |
+| `self-flow-training/` | `train-cnet-selflfow/` (Approach A), `train-lora-selfflow/` (Approach B) |
+| `light_downstream/` | build combined datasets, fine-tune SegFormer-B3, predict, score |
 | `util-img/` | figures used below |
-
-Downstream runs in four steps: `create_depthtrained_hf_datasets_real_plus_generated.py`
-builds a combined dataset from the real split plus one checkpoint's output,
-`train_segformer_light_overlap_ignore_cli.py` fine-tunes SegFormer-B3,
-`predict_segformer_overlap_ignore_cli.py` writes test-split label maps, and
-`compute_basic_seg_metrics_ignore255.py` reports IoU, Dice, precision, recall, specificity.
-
-## Conventions
-
-- **Text-free.** Every generator trains with an empty prompt, so it has to rely on the
-  spatial conditioning rather than on text.
-- **8 classes.** 0 = background, then abdominal wall, colon, liver, pancreas, small
-  intestine, spleen, stomach. Rare organs are painted last so they win overlaps. This
-  mapping has to stay identical everywhere it appears.
-- **Overlaps are ignored.** Where two masks overlap the downstream label is `255`, excluded
-  from training and metrics, so ambiguous boundaries never count either way.
-- **Depth maps** are precomputed as `{idx:06d}.png`, keyed to the dataset row index.
 
 ## Requirements
 
@@ -118,7 +141,7 @@ Arm 1 against its Self-Flow version, with the real frame for reference:
 
 ![Arm 1 with and without Self-Flow](util-img/gen-samples/self-flow-cnet-arm1.png)
 
-And Arm 3, which also gets the depth map as input:
+And Arm 3, which also takes the depth map as input:
 
 ![Arm 3 with and without Self-Flow](util-img/gen-samples/self-flow-cnet-arm3.png)
 
